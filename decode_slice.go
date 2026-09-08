@@ -124,14 +124,13 @@ func decodeSliceValue(d *Decoder, v reflect.Value) error {
 // growSliceValue grows v towards n elements, by at most maxStep at a time, so
 // that a declared n far larger than the data behind it is never allocated in
 // one go. The caller loops until v is long enough for the elements that
-// actually arrive.
+// actually arrive, and indexes what it grew, so v must always gain at least
+// one element however small a step it was given. The floor is minInitLen
+// rather than one element to avoid a reallocation per element; growing past
+// the elements n declares is still ruled out.
 func growSliceValue(v reflect.Value, n, maxStep int) reflect.Value {
-	diff := n - v.Len()
-	if diff > maxStep {
-		diff = maxStep
-	}
-	v = reflect.AppendSlice(v, reflect.MakeSlice(v.Type(), diff, diff))
-	return v
+	diff := min(max(maxStep, minInitLen), n-v.Len())
+	return reflect.AppendSlice(v, reflect.MakeSlice(v.Type(), diff, diff))
 }
 
 func decodeArrayValue(d *Decoder, v reflect.Value) error {

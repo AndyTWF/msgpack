@@ -11,6 +11,8 @@ package msgpack
 // data actually supplied rather than to the count in the header.
 
 import (
+	"bufio"
+	"bytes"
 	"runtime"
 	"strconv"
 	"testing"
@@ -268,5 +270,105 @@ func TestSecAllocBounded_NestedArrays(t *testing.T) {
 	if got > secAllocCeiling {
 		t.Fatalf("nested allocation not bounded: %d bytes of headers allocated %d bytes (> %d)",
 			len(data), got, secAllocCeiling)
+	}
+}
+
+// Test the same for a much longer run of nested array headers. Clipping each
+// collection to the input left is not enough on its own, because every level
+// is clipped against much the same input as the one above it, so the total
+// still grows with the square of the body.
+func TestSecAllocBounded_DeeplyNestedArrays(t *testing.T) {
+	data := []byte{0x9d, 0x00}
+	for i := 0; i < 2456; i++ {
+		data = append(data, 0xdc)
+	}
+
+	var dst interface{}
+	got := secMeasureAlloc(func() { _ = Unmarshal(data, &dst) })
+
+	t.Logf("%d bytes of headers, allocated=%.2f MiB", len(data), float64(got)/(1<<20))
+	if got > secAllocCeiling {
+		t.Fatalf("nested allocation not bounded: %d bytes allocated %d bytes (> %d)",
+			len(data), got, secAllocCeiling)
+	}
+}
+
+// Test that a wide structure, which spends from the same budget a deep nest
+// would, still decodes in full. It has to: every element costs at least a byte
+// to encode, so a body can never hold more elements than the budget allows.
+func TestSecHonestWideStructureRoundTrips(t *testing.T) {
+	in := make([]map[string]int, 2000)
+	for i := range in {
+		in[i] = map[string]int{"a": i, "b": i * 2, "c": i * 3}
+	}
+
+	b, err := Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var out []map[string]int
+	if err := Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(out) != len(in) {
+		t.Fatalf("length mismatch: got %d, want %d", len(out), len(in))
+	}
+	for i := range in {
+		if len(out[i]) != 3 || out[i]["b"] != i*2 {
+			t.Fatalf("entry %d wrong: %v", i, out[i])
+		}
+	}
+}
+
+// Test that an array declaring more elements than follow it into a typed slice
+// fails with an error. The slice is grown a step at a time towards the count
+// the header declares, and indexing what was grown panics if a step ever comes
+// back empty.
+func TestSecOverDeclaredTypedSliceErrors(t *testing.T) {
+	// enough elements to get past the minInitLen floor, which would
+	// otherwise size the slice past the body in one step
+	const supplied = minInitLen
+
+	data := secArray32Header(supplied + 1)
+	for i := 0; i < supplied; i++ {
+		data = append(data, byte(i))
+	}
+
+	var dst []int64
+	if err := Unmarshal(data, &dst); err == nil {
+		t.Fatalf("expected an error for %d elements declared and %d supplied, got none",
+			supplied+1, supplied)
+	}
+}
+
+// Test that a typed slice holding more elements than the reader had buffered
+// when it was sized decodes in full. What a reader has buffered is a lower
+// bound on what is coming, so the slice is sized short and has to grow.
+func TestSecTypedSliceBeyondBufferedInputRoundTrips(t *testing.T) {
+	const bufSize = 4096
+
+	in := make([]int64, 4*bufSize)
+	for i := range in {
+		in[i] = int64(i)
+	}
+	data, err := Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var out []int64
+	dec := NewDecoder(bufio.NewReaderSize(bytes.NewReader(data), bufSize))
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("decoding %d elements through a %d byte buffer: %v", len(in), bufSize, err)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("decoded %d elements, want %d", len(out), len(in))
+	}
+	for i := range in {
+		if out[i] != in[i] {
+			t.Fatalf("element %d is %d, want %d", i, out[i], in[i])
+		}
 	}
 }
