@@ -28,6 +28,13 @@ func secBin32Header(n uint32) []byte {
 	return []byte{0xc6, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
 }
 
+// secStr32Header builds a 5-byte str32 header declaring n bytes, with none of
+// them following it. Strings are read into the decoder's own scratch buffer,
+// unlike byte slices, which are read into the caller's.
+func secStr32Header(n uint32) []byte {
+	return []byte{0xdb, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+}
+
 // secMap32Header builds a 5-byte map32 header declaring n entries, with no body.
 func secMap32Header(n uint32) []byte {
 	return []byte{0xdf, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
@@ -208,4 +215,31 @@ func TestSecHonestLargeBytesRoundTrip(t *testing.T) {
 			t.Fatalf("value mismatch at %d: got %d, want %d", i, out[i], in[i])
 		}
 	}
+}
+
+// Test that decoding the same oversized length over and over costs the same
+// each time. Decoders are pooled, and a decode that fails partway keeps the
+// buffer it grew, so unless PutDecoder discards an oversized one the cost of
+// each decode climbs as the pool warms up.
+func TestSecPooledBufferDoesNotRatchet(t *testing.T) {
+	// a str, so that the read goes through the decoder's pooled scratch
+	// buffer rather than a slice the caller owns
+	data := secStr32Header(808_464_432)
+
+	var first, last uint64
+	for i := 0; i < 200; i++ {
+		var dst string
+		got := secMeasureAlloc(func() { _ = Unmarshal(data, &dst) })
+		if i == 0 {
+			first = got
+		}
+		last = got
+
+		if got > secAllocCeiling {
+			t.Fatalf("decode %d allocated %d bytes (> %d): the pooled scratch buffer is growing between decodes",
+				i, got, secAllocCeiling)
+		}
+	}
+
+	t.Logf("first=%.2f MiB last=%.2f MiB", float64(first)/(1<<20), float64(last)/(1<<20))
 }

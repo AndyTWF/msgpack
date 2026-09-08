@@ -16,13 +16,17 @@ import (
 const (
 	bytesAllocLimit = 1 << 20 // 1mb
 	sliceAllocLimit = 1 << 16 // 64k elements
-	maxMapSize      = 1 << 16 // 64k elements
+	maxMapSize      = 1 << 12 // 4k elements
 )
 
 // The slice and map limits above cap how many elements are allocated up front
 // from a length the stream declares but has not yet supplied. Anything longer
 // still decodes, growing through append and map assignment as the elements
 // arrive, so the limits only have to keep the common case from reallocating.
+//
+// The map limit is the lower of the two because a map entry costs much more
+// memory than a slice element: around 80 bytes once Go has sized its buckets,
+// against 16 bytes for an element of a []interface{}.
 
 const (
 	looseInterfaceDecodingFlag uint32 = 1 << iota
@@ -51,6 +55,14 @@ func GetDecoder() *Decoder {
 func PutDecoder(dec *Decoder) {
 	dec.r = nil
 	dec.s = nil
+
+	// A decode that fails partway keeps the buffer it grew towards the
+	// declared length, so discard an oversized one rather than leave it in
+	// the pool for the next decode to grow further still.
+	if cap(dec.buf) > bytesAllocLimit {
+		dec.buf = nil
+	}
+
 	decPool.Put(dec)
 }
 
