@@ -22,6 +22,12 @@ func secArray32Header(n uint32) []byte {
 	return []byte{0xdd, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
 }
 
+// secBin32Header builds a 5-byte bin32 header declaring n bytes, with none of
+// them following it.
+func secBin32Header(n uint32) []byte {
+	return []byte{0xc6, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+}
+
 // secMap32Header builds a 5-byte map32 header declaring n entries, with no body.
 func secMap32Header(n uint32) []byte {
 	return []byte{0xdf, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
@@ -145,5 +151,61 @@ func TestSecHonestLargeMapRoundTrips(t *testing.T) {
 	}
 	if out["0"] != 0 || out[strconv.Itoa(n-1)] != int64(n-1) {
 		t.Fatalf("value mismatch: out[0]=%d out[%d]=%d", out["0"], n-1, out[strconv.Itoa(n-1)])
+	}
+}
+
+// Test that a bin header declaring far more bytes than follow it does not
+// allocate the length it declares, whether the destination is a []byte or an
+// interface{}.
+func TestSecAllocBounded_Bytes(t *testing.T) {
+	const declared = 808_464_432
+
+	data := secBin32Header(declared)
+
+	for _, tc := range []struct {
+		name string
+		dst  interface{}
+	}{
+		{"[]byte", new([]byte)},
+		{"interface{}", new(interface{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := secMeasureAlloc(func() { _ = Unmarshal(data, tc.dst) })
+
+			t.Logf("declared=%d bytes, allocated=%.1f MiB (step=%d)",
+				declared, float64(got)/(1<<20), bytesAllocLimit)
+			if got > secAllocCeiling {
+				t.Fatalf("byte slice allocation not bounded: a %d-byte header allocated %d bytes (> %d)",
+					len(data), got, secAllocCeiling)
+			}
+		})
+	}
+}
+
+// Test that a byte slice longer than bytesAllocLimit still decodes in full,
+// now that it is assembled a step at a time.
+func TestSecHonestLargeBytesRoundTrip(t *testing.T) {
+	in := make([]byte, 3*bytesAllocLimit+17)
+	for i := range in {
+		in[i] = byte(i)
+	}
+
+	b, err := Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var out []byte
+	if err := Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(out) != len(in) {
+		t.Fatalf("length mismatch: got %d, want %d", len(out), len(in))
+	}
+	for i := range in {
+		if out[i] != in[i] {
+			t.Fatalf("value mismatch at %d: got %d, want %d", i, out[i], in[i])
+		}
 	}
 }

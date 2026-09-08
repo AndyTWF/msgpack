@@ -646,6 +646,24 @@ func (d *Decoder) readN(n int) ([]byte, error) {
 	return d.buf, nil
 }
 
+// readNInto reads n bytes into b, which it grows or replaces as needed.
+//
+// n comes from a str, bin or ext header, so it is declared by the stream and
+// not yet backed by any data: a five-byte bin32 header can declare 4gb. Unless
+// alloc limits are disabled it therefore grows in bytesAllocLimit steps as the
+// data arrives, rather than allocating the declared length up front, so a
+// header longer than the data that follows costs one step and an error.
+//
+// This is the counterpart of Decoder.readN, which makes the same choice for
+// the decoder's own scratch buffer, and exists because the value read here is
+// returned to the caller and so cannot share that buffer.
+func (d *Decoder) readNInto(b []byte, n int) ([]byte, error) {
+	if d.flags&disableAllocLimitFlag != 0 {
+		return readN(d.r, b, n)
+	}
+	return readNGrow(d.r, b, n)
+}
+
 func readN(r io.Reader, b []byte, n int) ([]byte, error) {
 	if b == nil {
 		if n == 0 {
