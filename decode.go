@@ -86,11 +86,19 @@ type Decoder struct {
 	r          io.Reader
 	s          io.ByteScanner
 	mapDecoder func(*Decoder) (interface{}, error)
-	structTag  string
-	buf        []byte
-	rec        []byte
-	dict       []string
-	flags      uint32
+
+	// If the reader can report how much input is left, one of these holds
+	// it: a bytes.Reader, bytes.Buffer or strings.Reader through Len, a
+	// bufio.Reader through Buffered. At most one is ever set, and initLen
+	// uses whichever it is. They are interfaces rather than bound methods
+	// because binding a method allocates.
+	lenr      interface{ Len() int }
+	bufr      interface{ Buffered() int }
+	structTag string
+	buf       []byte
+	rec       []byte
+	dict      []string
+	flags     uint32
 }
 
 // NewDecoder returns a new decoder that reads from r.
@@ -140,6 +148,18 @@ func (d *Decoder) ResetReader(r io.Reader) {
 		br := bufio.NewReader(r)
 		d.r = br
 		d.s = br
+	}
+
+	// Work out once, rather than on every collection decoded, which method
+	// reports how much input is left. Len is exact, and is what Unmarshal
+	// ends up using; Buffered counts only what has been read ahead, so it
+	// is a lower bound, which initLen is still safe to clip against.
+	d.lenr, d.bufr = nil, nil
+	switch rr := d.r.(type) {
+	case interface{ Len() int }:
+		d.lenr = rr
+	case interface{ Buffered() int }:
+		d.bufr = rr
 	}
 }
 
@@ -658,6 +678,54 @@ func (d *Decoder) readN(n int) ([]byte, error) {
 	return d.buf, nil
 }
 
+// initLen returns how many elements of a collection to allocate up front,
+// given that the stream has declared n of them.
+//
+// n is declared by the input and not yet backed by any of it, so it is clipped
+// two ways: to limit, and to as many elements as the input still to come could
+// possibly hold, at minBytesPerElem bytes each.
+//
+// The second clip is what bounds nesting. A limit alone does not: a three-byte
+// array16 header can declare 60k elements, which sits under any useful limit,
+// and a body full of them nests so that every level allocates its own. Sixteen
+// bytes of headers reached 8mb that way.
+//
+// Clipping is always safe. This is only how much is allocated before the
+// elements arrive; append and map assignment grow to fit however many actually
+// do, so a clip that turns out to be low costs a reallocation and nothing else.
+func (d *Decoder) initLen(n, limit, minBytesPerElem int) int {
+	if d.flags&disableAllocLimitFlag != 0 {
+		return n
+	}
+	if n > limit {
+		n = limit
+	}
+	if avail := d.bytesAvailable(); avail >= 0 {
+		// keep a floor, so that a reader which happens to have little
+		// buffered does not cost every small collection a reallocation
+		if max := max(avail/minBytesPerElem, minInitLen); n > max {
+			n = max
+		}
+	}
+	return n
+}
+
+// minInitLen is the smallest collection we will size from the input remaining,
+// below which the clip costs more in reallocation than it saves.
+const minInitLen = 64
+
+// bytesAvailable reports a lower bound on the input still to be read, or -1 if
+// the reader cannot report it at all.
+func (d *Decoder) bytesAvailable() int {
+	if d.lenr != nil {
+		return d.lenr.Len()
+	}
+	if d.bufr != nil {
+		return d.bufr.Buffered()
+	}
+	return -1
+}
+
 // readNInto reads n bytes into b, which it grows or replaces as needed.
 //
 // n comes from a str, bin or ext header, so it is declared by the stream and
@@ -737,6 +805,13 @@ func readNGrow(r io.Reader, b []byte, n int) ([]byte, error) {
 
 func min(a, b int) int { //nolint:unparam
 	if a <= b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b

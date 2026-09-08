@@ -35,6 +35,11 @@ func secStr32Header(n uint32) []byte {
 	return []byte{0xdb, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
 }
 
+// secArray16Header builds a 3-byte array16 header declaring n elements.
+func secArray16Header(n uint16) []byte {
+	return []byte{0xdc, byte(n >> 8), byte(n)}
+}
+
 // secMap32Header builds a 5-byte map32 header declaring n entries, with no body.
 func secMap32Header(n uint32) []byte {
 	return []byte{0xdf, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
@@ -242,4 +247,26 @@ func TestSecPooledBufferDoesNotRatchet(t *testing.T) {
 	}
 
 	t.Logf("first=%.2f MiB last=%.2f MiB", float64(first)/(1<<20), float64(last)/(1<<20))
+}
+
+// Test that a body of nothing but nested array headers stays bounded. A limit
+// on each collection does not bound their total, because every level allocates
+// its own and a three-byte header can declare 65535 elements while sitting
+// under any useful limit.
+func TestSecAllocBounded_NestedArrays(t *testing.T) {
+	const depth = 64
+
+	var data []byte
+	for i := 0; i < depth; i++ {
+		data = append(data, secArray16Header(65535)...)
+	}
+
+	var dst interface{}
+	got := secMeasureAlloc(func() { _ = Unmarshal(data, &dst) })
+
+	t.Logf("depth=%d in %d bytes, allocated=%.2f MiB", depth, len(data), float64(got)/(1<<20))
+	if got > secAllocCeiling {
+		t.Fatalf("nested allocation not bounded: %d bytes of headers allocated %d bytes (> %d)",
+			len(data), got, secAllocCeiling)
+	}
 }
