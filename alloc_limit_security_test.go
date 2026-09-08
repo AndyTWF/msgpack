@@ -12,6 +12,7 @@ package msgpack
 
 import (
 	"runtime"
+	"strconv"
 	"testing"
 )
 
@@ -35,9 +36,11 @@ func secMeasureAlloc(fn func()) uint64 {
 	return after.TotalAlloc - before.TotalAlloc
 }
 
-// A correctly-bounded decoder allocates around the library's own caps
-// (sliceAllocLimit / maxMapSize = 1e6 elements), far below the declared 10M.
-const secAllocCeiling = 32 << 20 // 32 MiB
+// secAllocCeiling is the most a decode of a handful of bytes may allocate. It
+// sits just above what sliceAllocLimit and maxMapSize cost, so that these tests
+// fail both if the bounding is removed and if the limits are raised far enough
+// to matter.
+const secAllocCeiling = 4 << 20
 
 const secDeclared = 10_000_000 // declared by a 5-byte header
 
@@ -71,16 +74,18 @@ func TestSecAllocBounded_InterfaceSlice(t *testing.T) {
 	}
 }
 
-// Map path (DecodeMap). Bounded by maxMapSize after the fix. The ceiling here is
-// higher because Go pre-sizes map buckets (~70 MiB at the 1e6 cap), but that is
-// still an order of magnitude below the unbounded ~700 MiB for 10M entries.
+// Test the same for a map, which is allocated once at its declared size rather
+// than grown an element at a time.
 func TestSecAllocBounded_Map(t *testing.T) {
 	data := secMap32Header(secDeclared)
 	var dst map[string]interface{}
 
 	got := secMeasureAlloc(func() { _ = Unmarshal(data, &dst) })
 
-	const mapCeiling = 150 << 20 // 150 MiB
+	// a map is allowed more than secAllocCeiling because Go sizes map
+	// buckets generously, at roughly 80 bytes an entry against 16 for a
+	// slice element
+	const mapCeiling = 16 << 20
 	t.Logf("declared=%d entries, allocated=%.1f MiB (cap=%d)",
 		secDeclared, float64(got)/(1<<20), int(maxMapSize))
 	if got > mapCeiling {
@@ -91,7 +96,7 @@ func TestSecAllocBounded_Map(t *testing.T) {
 // Test that a slice with more elements than the limit still decodes in full,
 // so that bounding what is allocated up front has not capped the result.
 func TestSecHonestLargeSliceRoundTrips(t *testing.T) {
-	const n = 1_500_000 // > sliceAllocLimit (1e6)
+	const n = 1_500_000 // more than sliceAllocLimit
 
 	in := make([]int64, n)
 	for i := range in {
@@ -113,5 +118,32 @@ func TestSecHonestLargeSliceRoundTrips(t *testing.T) {
 	}
 	if out[0] != 0 || out[n-1] != int64(n-1) {
 		t.Fatalf("value mismatch: out[0]=%d out[%d]=%d", out[0], n-1, out[n-1])
+	}
+}
+
+// Test that a map with more entries than the limit still decodes in full.
+func TestSecHonestLargeMapRoundTrips(t *testing.T) {
+	const n = 200_000 // more than maxMapSize
+
+	in := make(map[string]int64, n)
+	for i := 0; i < n; i++ {
+		in[strconv.Itoa(i)] = int64(i)
+	}
+
+	b, err := Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var out map[string]int64
+	if err := Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(out) != n {
+		t.Fatalf("length mismatch: got %d, want %d", len(out), n)
+	}
+	if out["0"] != 0 || out[strconv.Itoa(n-1)] != int64(n-1) {
+		t.Fatalf("value mismatch: out[0]=%d out[%d]=%d", out["0"], n-1, out[strconv.Itoa(n-1)])
 	}
 }

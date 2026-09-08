@@ -15,9 +15,14 @@ import (
 
 const (
 	bytesAllocLimit = 1 << 20 // 1mb
-	sliceAllocLimit = 1e6     // 1m elements
-	maxMapSize      = 1e6     // 1m elements
+	sliceAllocLimit = 1 << 16 // 64k elements
+	maxMapSize      = 1 << 16 // 64k elements
 )
+
+// The slice and map limits above cap how many elements are allocated up front
+// from a length the stream declares but has not yet supplied. Anything longer
+// still decodes, growing through append and map assignment as the elements
+// arrive, so the limits only have to keep the common case from reallocating.
 
 const (
 	looseInterfaceDecodingFlag uint32 = 1 << iota
